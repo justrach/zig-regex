@@ -719,6 +719,31 @@ pub const Parser = struct {
                 // Not a complete POSIX class, fall through to treat [ as literal
             }
 
+            // Handle escape shorthand classes (\d, \D, \w, \W, \s, \S) inside [...]
+            // These expand to their predefined ranges, just like they do outside [...].
+            switch (self.peek()) {
+                .escape_d, .escape_D,
+                .escape_w, .escape_W,
+                .escape_s, .escape_S,
+                => {
+                    const class: common.CharClass = switch (self.peek()) {
+                        .escape_d => common.CharClasses.digit,
+                        .escape_D => common.CharClasses.non_digit,
+                        .escape_w => common.CharClasses.word,
+                        .escape_W => common.CharClasses.non_word,
+                        .escape_s => common.CharClasses.whitespace,
+                        .escape_S => common.CharClasses.non_whitespace,
+                        else => unreachable,
+                    };
+                    for (class.ranges) |r| {
+                        try ranges.append(self.allocator, r);
+                    }
+                    try self.advance();
+                    continue;
+                },
+                else => {},
+            }
+
             const first_char = self.getCharClassChar() orelse {
                 return RegexError.InvalidCharacterClass;
             };
@@ -912,4 +937,46 @@ test "parser: acceptable nesting depth" {
     defer result.deinit();
 
     try std.testing.expectEqual(@as(usize, 50), result.capture_count);
+}
+
+test "parser: escape shorthands inside character class" {
+    const allocator = std.testing.allocator;
+
+    // [\d] must parse without error (previously returned InvalidCharacterClass)
+    {
+        var parser = try Parser.init(allocator, "[\\d]");
+        var result = try parser.parse();
+        defer result.deinit();
+        try std.testing.expectEqual(ast.NodeType.char_class, result.root.node_type);
+    }
+
+    // [\w] inside a larger class
+    {
+        var parser = try Parser.init(allocator, "[\\w]+");
+        var result = try parser.parse();
+        defer result.deinit();
+    }
+
+    // [\s\d] — two shorthands combined
+    {
+        var parser = try Parser.init(allocator, "[\\s\\d]");
+        var result = try parser.parse();
+        defer result.deinit();
+        try std.testing.expectEqual(ast.NodeType.char_class, result.root.node_type);
+    }
+
+    // [a-z\d] — range followed by shorthand
+    {
+        var parser = try Parser.init(allocator, "[a-z\\d]");
+        var result = try parser.parse();
+        defer result.deinit();
+        try std.testing.expectEqual(ast.NodeType.char_class, result.root.node_type);
+    }
+
+    // [\D], [\W], [\S] — uppercase negated shorthands
+    {
+        var parser = try Parser.init(allocator, "[\\D\\W\\S]");
+        var result = try parser.parse();
+        defer result.deinit();
+    }
 }
